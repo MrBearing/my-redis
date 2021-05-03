@@ -1,20 +1,112 @@
+// use mini_redis::client;
+// // 
+// #[tokio::main]
+// async fn main() {
+//     // サーバーへのコネクションを確立する
+//     let mut client = client::connect("127.0.0.1:6379").await.unwrap();
+
+//     // 2つのタスクを spawn する。
+//     // タスク1 はキーによる "get" を行い、// タスク2 は値を "set" する。
+    
+//     let t1 = tokio::spawn(async {
+//         let res = client.get("hello").await;//clientを借用してるのでasyncブロック内で使えない
+//     });
+
+//     let t2 = tokio::spawn(async {
+//         client.set("foo", "bar".into()).await;
+//     });
+
+//     t1.await.unwrap();
+//     t2.await.unwrap();
+// }
+
+use bytes::Bytes;
 use mini_redis::client;
-// error occur  
+use tokio::sync::{mpsc, oneshot};
+
+/// Multiple different commands are multiplexed over a single channel.
+#[derive(Debug)]
+enum Command {
+    Get {
+        key: String,
+        resp: Responder<Option<Bytes>>,
+    },
+    Set {
+        key: String,
+        val: Vec<u8>,
+        resp: Responder<()>,
+    },
+}
+
+/// Provided by the requester and used by the manager task to send the command
+/// response back to the requester.
+type Responder<T> = oneshot::Sender<mini_redis::Result<T>>;
+
 #[tokio::main]
 async fn main() {
-    // サーバーへのコネクションを確立する
-    let mut client = client::connect("127.0.0.1:6379").await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    // Clone a `tx` handle for the second f
+    let tx2 = tx.clone();
 
-    // 2つのタスクを spawn する。
-    // タスク1 はキーによる "get" を行い、// タスク2 は値を "set" する。
-    let t1 = tokio::spawn(async {
-        let res = client.get("hello").await;
+    let manager = tokio::spawn(async move {
+        // Open a connection to the mini-redis address.
+        let mut client = client::connect("127.0.0.1:6379").await.unwrap();
+
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                Command::Get { key, resp } => {
+                    let res = client.get(&key).await;
+                    // Ignore errors
+                    let _ = resp.send(res);
+                }
+                Command::Set { key, val, resp } => {
+                    let res = client.set(&key, val.into()).await;
+                    // Ignore errors
+                    let _ = resp.send(res);
+                }
+            }
+        }
     });
 
-    let t2 = tokio::spawn(async {
-        client.set("foo", "bar".into()).await;
+    // Spawn two tasks, each setting a value
+    let t1 = tokio::spawn(async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let cmd = Command::Get {
+            key: "hello".to_string(),
+            resp: resp_tx,
+        };
+
+        // Send the GET request
+        if tx.send(cmd).await.is_err() {
+            eprintln!("connection task shutdown");
+            return;
+        }
+
+        // Await the response
+        let res = resp_rx.await;
+        println!("GOT = {:?}", res);
+    });
+
+    let t2 = tokio::spawn(async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let cmd = Command::Set {
+            key: "foo".to_string(),
+            val: b"bar".to_vec(),
+            resp: resp_tx,
+        };
+
+        // Send the SET request
+        if tx2.send(cmd).await.is_err() {
+            eprintln!("connection task shutdown");
+            return;
+        }
+
+        // Await the response
+        let res = resp_rx.await;
+        println!("GOT = {:?}", res)
     });
 
     t1.await.unwrap();
     t2.await.unwrap();
+    manager.await.unwrap();
 }
