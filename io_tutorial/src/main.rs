@@ -1,27 +1,29 @@
-use tokio::io::{self, AsyncReadExt,AysyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = TcpStream::connect("127.0.0.1:6142").await?;
+    let listener = TcpListener::bind("127.0.0.1:6142").await.unwrap();
 
-    let (mut reader, mut writer) = io::split(socket);
+    loop {
+        let (mut socket, _) = listener.accept().await?;
 
-    let  write_task = tokio::spawn(async move {
-        writer.write_all(b"hello\r\n").await?;
-        writer.write_all(b"world\r\n").await?;
+        tokio::spawn(async move {
+            let mut buf = vec![0; 1024];
 
-        Ok::<(_, io::Error)>(())
-    })
-
-    let mut buf = vec![0; 128];
-
-    loop{
-        let n = reader.read(&mut buf).await?;
-        if n == 0 { break;}
-
-        println!("GOT{:?}",&buf[..n]);
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        if socket.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        return;
+                    }
+                }
+            }
+        });
     }
-
-    Ok(())
 }
